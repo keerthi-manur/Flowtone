@@ -1,11 +1,45 @@
-# 🥁 GESTURE.DJ
+# 🎵 Flowtone
 
-Play drums and violin with your hands. No keyboard. No mouse.  
-MediaPipe hand tracking → gesture classification → real-time audio.
+Play instruments with your hands. No controllers, no keyboard — just your webcam and gestures.
+
+Flowtone uses real-time hand tracking to let you perform drums and violin using nothing but hand positions and finger gestures. Built with MediaPipe, OpenCV, and pygame.
 
 ---
 
-## Setup (do this once)
+## Modes
+
+### 🥁 Drum Mode
+
+Each hand plays a different kit:
+
+| Gesture | Left hand | Right hand |
+|---------|-----------|------------|
+| ✊ Fist | rest position | rest position |
+| ☝ 1 finger | Snare | Snare 2 |
+| ✌ 2 fingers | Hi-Hat | Tambourine |
+| 3 fingers | Bass Drum | Djembe |
+| 🖐 Open palm | Hand Cymbals | Clash Cymbals |
+
+Right hand height controls volume.
+
+### 🎻 Violin Mode
+
+| Action | Effect |
+|--------|--------|
+| Left hand height | Pitch (A4 → G5) |
+| Right hand height | Volume / bow pressure |
+| 👋 Wave left hand | Vibrato |
+| ✊ Fist | Mute |
+
+Hold a note still and it transitions to a sustained bow sound. Slide through notes quickly for a staccato effect.
+
+### Switching modes
+
+Hold both 👍 thumbs up simultaneously to switch between drum and violin mode.
+
+---
+
+## Setup
 
 ### 1. Install dependencies
 
@@ -13,25 +47,31 @@ MediaPipe hand tracking → gesture classification → real-time audio.
 pip install mediapipe opencv-python pygame numpy requests
 ```
 
-> On macOS you may need to grant camera access to Terminal/iTerm in  
-> System Settings → Privacy & Security → Camera.
+> macOS: grant camera access to Terminal in System Settings → Privacy & Security → Camera.
 
-### 2. Generate audio samples
+### 2. Add your samples
 
+Place your audio files in a `samples/` folder. Supported formats: `.wav`, `.mp3`
+
+**Drums** — name your files:
+`snare.mp3`, `hihat.mp3`, `bass_drum.mp3`, `hand_cymbals.mp3`, `snare2.mp3`, `tambourine.mp3`, `djembe.mp3`, `clash_cymbals.mp3`
+
+**Violin** — name your files:
+`violin_A4.mp3`, `violin_B4.mp3`, ... `violin_G5.mp3`
+
+For sustained bow sounds, add long versions:
+`violin_A4_long.mp3`, `violin_B4_long.mp3`, ... `violin_G5_long.mp3`
+
+If you don't have samples, run the synthesizer to generate basic ones:
 ```bash
 python download_samples.py
 ```
 
-This synthesizes drum hits and violin notes locally — no internet needed.  
-You can replace any `.wav` in `./samples/` with your own real recordings.
-
-### 3. (Optional) Add your ElevenLabs key
+### 3. (Optional) ElevenLabs voice announcements
 
 ```bash
 export ELEVENLABS_API_KEY=your_key_here
 ```
-
-Or pass it as a flag: `--elevenlabs-key your_key_here`
 
 ---
 
@@ -45,48 +85,12 @@ A window opens with your webcam feed. Hold your hands up in frame.
 
 ---
 
-## Controls
-
-| Hand | What it controls |
-|------|-----------------|
-| Left hand height | Pitch (violin) |
-| Right hand height | Volume (both modes) |
-| Left hand gesture | Drum hit / bowing style |
-| Thumbs up (either hand) | Switch mode |
-
-### Drum Mode gestures (left hand)
-
-| Gesture | Sound |
-|---------|-------|
-| ✊ Fist | Kick drum |
-| ☝ 1 finger | Snare |
-| ✌ 2 fingers | Hi-hat (closed) |
-| 3 fingers | Tom |
-| 🖐 Open palm | Crash cymbal |
-| 👌 Pinch | Rimshot |
-| 👍 Thumbs up | → Switch to Violin |
-
-Right hand also triggers:  
-✊ Fist = Kick, ☝ = Hi-hat open, 🖐 = Crash
-
-### Violin Mode gestures
-
-| Action | Effect |
-|--------|--------|
-| Left hand height | Note (A3 → D5, pentatonic) |
-| Right hand height | Volume / bow pressure |
-| 👋 Wave left hand | Vibrato |
-| ✊ Fist (left) | Mute |
-| 👍 Thumbs up | → Switch to Drums |
-
----
-
 ## Tips
 
-- **Keep hands between shoulder and waist height** — the full Y range maps to pitch/volume
-- **Drum mode works best** when you make deliberate, clean gestures and hold them briefly
-- **Violin mode** is continuous — your note changes as you move your hand up/down
-- If gestures feel jittery, try better lighting (face a window)
+- Keep hands between shoulder and waist height — the full vertical range maps to pitch and volume
+- Use a fist as your neutral/rest position between drum hits
+- Better lighting = more accurate tracking (face a window)
+- Plain background behind your hands helps detection
 - Press `Q` to quit
 
 ---
@@ -94,36 +98,24 @@ Right hand also triggers:
 ## File structure
 
 ```
-gesture_dj/
-├── main.py              # entry point
-├── gesture_engine.py    # MediaPipe tracking + gesture classification
-├── sound_engine.py      # pygame audio management
-├── elevenlabs_client.py # TTS voice announcements
-├── overlay.py           # OpenCV HUD
-├── download_samples.py  # generates audio samples
-└── samples/             # .wav files (created by download_samples.py)
-    ├── kick.wav
-    ├── snare.wav
-    ├── ...
-    ├── violin_A3.wav
-    └── violin_D5.wav
+flowtone/
+├── main.py                # entry point
+├── gesture_engine.py      # MediaPipe tracking + gesture classification
+├── sound_engine.py        # pygame audio management
+├── elevenlabs_client.py   # TTS voice announcements
+├── overlay.py             # OpenCV HUD
+├── download_samples.py    # generates synthesized samples as fallback
+└── samples/               # your audio files go here
 ```
 
 ---
 
 ## Troubleshooting
 
-**Camera not found**  
-Try `--camera 1` or `--camera 2` if you have multiple cameras.
+**Wrong camera** — try `--camera 1` or `--camera 2`
 
-**No sound**  
-Make sure you ran `python download_samples.py` first.  
-Check that `./samples/` has `.wav` files in it.
+**Hands swapped** — run with `--no-mirror` to toggle hand assignment
 
-**Gestures not detecting well**  
-- Better lighting helps a lot
-- Keep hands 30–60 cm from camera
-- Plain background behind hands (avoid busy patterns)
+**No sound** — check that `./samples/` exists and has audio files in it
 
-**macOS camera permission denied**  
-System Settings → Privacy & Security → Camera → enable Terminal (or your app)
+**Gestures not detecting well** — better lighting, keep hands 30–60cm from camera, avoid busy backgrounds
