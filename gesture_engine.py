@@ -7,74 +7,71 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import time
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
 
 
 class Mode(Enum):
-    DRUMS = "drums"
+    DRUMS  = "drums"
     VIOLIN = "violin"
 
 
 class Gesture(Enum):
-    FIST = "fist"
-    ONE_FINGER = "one_finger"
-    TWO_FINGERS = "two_fingers"
+    FIST          = "fist"
+    ONE_FINGER    = "one_finger"
+    TWO_FINGERS   = "two_fingers"
     THREE_FINGERS = "three_fingers"
-    OPEN_PALM = "open_palm"
-    THUMBS_UP = "thumbs_up"
-    WAVE = "wave"
-    PINCH = "pinch"
-    NEUTRAL = "neutral"
+    OPEN_PALM     = "open_palm"
+    THUMBS_UP     = "thumbs_up"
+    WAVE          = "wave"
+    PINCH         = "pinch"
+    NEUTRAL       = "neutral"
 
 
 @dataclass
 class HandState:
-    """Tracks state for one hand across frames"""
     landmarks: list = field(default_factory=list)
     gesture: Gesture = Gesture.NEUTRAL
     prev_gesture: Gesture = Gesture.NEUTRAL
-    gesture_frames: int = 0          # how many consecutive frames this gesture held
-    y_norm: float = 0.5              # normalized Y position (0=top, 1=bottom)
-    x_norm: float = 0.5             # normalized X position
-    prev_x: float = 0.5
+    gesture_frames: int = 0
+    y_norm: float = 0.5
+    x_norm: float = 0.5
     wave_history: list = field(default_factory=list)
     is_waving: bool = False
-    last_trigger_time: float = 0.0  # debounce
+    last_trigger_time: float = 0.0
 
 
 class GestureEngine:
-    # Tuning constants
-    GESTURE_CONFIRM_FRAMES = 3    # frames before a gesture fires
-    TRIGGER_DEBOUNCE = 0.18       # seconds between same-gesture triggers (drums)
-    VIOLIN_UPDATE_INTERVAL = 0.05 # seconds between violin note updates
-    THUMBS_DEBOUNCE = 1.0         # seconds between mode switches
-    WAVE_WINDOW = 12              # frames for wave detection
-    WAVE_THRESHOLD = 0.07         # x-delta threshold for wave
+    GESTURE_CONFIRM_FRAMES = 4
+    TRIGGER_DEBOUNCE       = 0.22
+    VIOLIN_UPDATE_INTERVAL = 0.05
+    THUMBS_DEBOUNCE        = 1.2
+    WAVE_WINDOW            = 14
+    WAVE_THRESHOLD         = 0.06
 
-    def __init__(self, camera_index, sound, voice, overlay):
-        self.sound = sound
-        self.voice = voice
+    def __init__(self, camera_index, sound, voice, overlay, mirror=False):
+        self.sound   = sound
+        self.voice   = voice
         self.overlay = overlay
-        self.mode = Mode.DRUMS
+        self.mirror  = mirror
+        self.mode    = Mode.DRUMS
 
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.6,
+            min_detection_confidence=0.72,
+            min_tracking_confidence=0.65,
         )
-        self.mp_draw = mp.solutions.drawing_utils
-        self.mp_style = mp.solutions.drawing_styles
 
         self.cap = cv2.VideoCapture(camera_index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
 
-        self.left_hand = HandState()
+        self.left_hand  = HandState()
         self.right_hand = HandState()
 
         self.last_thumbs_time = 0.0
@@ -82,102 +79,77 @@ class GestureEngine:
         self.last_violin_note = -1
 
         self.frame_count = 0
-        self.fps = 0
-        self.fps_time = time.time()
+        self.fps         = 0
+        self.fps_time    = time.time()
 
-    # ── LANDMARK HELPERS ──────────────────────────────────────────
+        self.left_label  = "—"
+        self.right_label = "—"
 
-    def _tip(self, lm, idx):
-        """Return (x, y) normalized for a landmark index"""
-        l = lm[idx]
-        return l.x, l.y
+    # ── LANDMARK HELPERS ─────────────────────────────────────────
 
-    def _finger_extended(self, lm, tip_idx, pip_idx):
-        """True if fingertip is above its PIP joint (finger up)"""
-        return lm[tip_idx].y < lm[pip_idx].y
+    def _finger_up(self, lm, tip, pip):
+        return lm[tip].y < lm[pip].y - 0.02
 
-    def _count_extended_fingers(self, lm):
-        """Count how many of the 4 fingers (not thumb) are extended"""
-        fingers = [
-            (8, 6),   # index tip, pip
-            (12, 10), # middle
-            (16, 14), # ring
-            (20, 18), # pinky
-        ]
-        return sum(self._finger_extended(lm, t, p) for t, p in fingers)
+    def _count_fingers(self, lm):
+        return sum(self._finger_up(lm, t, p)
+                   for t, p in [(8,6),(12,10),(16,14),(20,18)])
 
-    def _thumb_extended(self, lm, handedness):
-        """Check if thumb tip is to the side of thumb IP joint"""
-        tip_x = lm[4].x
-        ip_x = lm[3].x
-        # For right hand, tip should be to the left of IP to be extended
-        if handedness == "Right":
-            return tip_x < ip_x - 0.03
-        else:
-            return tip_x > ip_x + 0.03
+    def _thumb_up_gesture(self, lm):
+        """
+        Reliable thumbs-up detection:
+        - Thumb tip is well above the wrist
+        - Thumb tip is higher than all other fingertips
+        - At least 3 of 4 fingers are curled (tip below its knuckle/MCP)
+        """
+        thumb_tip = lm[4]
+        wrist     = lm[0]
 
-    def _thumbs_up(self, lm, handedness):
-        """Thumb up + all other fingers curled"""
-        if not self._thumb_extended(lm, handedness):
-            return False
         # Thumb tip must be clearly above wrist
-        if lm[4].y > lm[0].y - 0.05:
+        if thumb_tip.y > wrist.y - 0.12:
             return False
-        # Other fingers curled
-        return self._count_extended_fingers(lm) == 0
 
-    def _pinch_distance(self, lm):
-        """Distance between thumb tip and index tip"""
-        tx, ty = lm[4].x, lm[4].y
-        ix, iy = lm[8].x, lm[8].y
-        return ((tx - ix)**2 + (ty - iy)**2) ** 0.5
+        # Thumb tip must be above all other fingertips
+        other_tips = [lm[i] for i in (8, 12, 16, 20)]
+        if any(thumb_tip.y > tip.y for tip in other_tips):
+            return False
 
-    def classify_gesture(self, lm, handedness) -> Gesture:
-        """Classify a hand's landmarks into a Gesture enum"""
-        n_fingers = self._count_extended_fingers(lm)
-        thumb_up = self._thumbs_up(lm, handedness)
+        # Most fingers curled: tip below MCP (knuckle)
+        curled = sum(lm[tip].y > lm[mcp].y
+                     for tip, mcp in [(8,5),(12,9),(16,13),(20,17)])
+        return curled >= 3
 
-        if thumb_up:
+    def _pinch_dist(self, lm):
+        return (((lm[4].x-lm[8].x)**2 + (lm[4].y-lm[8].y)**2) ** 0.5)
+
+    def classify_gesture(self, lm) -> Gesture:
+        if self._thumb_up_gesture(lm):
             return Gesture.THUMBS_UP
 
-        # Pinch check
-        if self._pinch_distance(lm) < 0.05 and n_fingers <= 1:
-            return Gesture.PINCH
+        n = self._count_fingers(lm)
 
-        if n_fingers == 0:
-            return Gesture.FIST
-        elif n_fingers == 1:
-            return Gesture.ONE_FINGER
-        elif n_fingers == 2:
-            return Gesture.TWO_FINGERS
-        elif n_fingers == 3:
-            return Gesture.THREE_FINGERS
-        else:
-            return Gesture.OPEN_PALM
+        if self._pinch_dist(lm) < 0.05 and n <= 1:
+            return Gesture.PINCH
+        if n == 0: return Gesture.FIST
+        if n == 1: return Gesture.ONE_FINGER
+        if n == 2: return Gesture.TWO_FINGERS
+        if n == 3: return Gesture.THREE_FINGERS
+        return Gesture.OPEN_PALM
 
     def _detect_wave(self, hand: HandState) -> bool:
-        """Detect left-right waving motion from wrist x position history"""
         if len(hand.wave_history) < self.WAVE_WINDOW:
             return False
-        history = hand.wave_history[-self.WAVE_WINDOW:]
-        # Count direction changes
+        h = hand.wave_history[-self.WAVE_WINDOW:]
         changes = 0
-        for i in range(1, len(history) - 1):
-            prev_dir = history[i] - history[i-1]
-            next_dir = history[i+1] - history[i]
-            if abs(history[i] - history[i-1]) > self.WAVE_THRESHOLD:
-                if (prev_dir > 0) != (next_dir > 0):
+        for i in range(1, len(h)-1):
+            if abs(h[i] - h[i-1]) > self.WAVE_THRESHOLD:
+                if (h[i]-h[i-1] > 0) != (h[i+1]-h[i] > 0):
                     changes += 1
         return changes >= 2
 
     # ── HAND ASSIGNMENT ──────────────────────────────────────────
 
     def _assign_hands(self, results):
-        """
-        Map detected hands to left/right HandState objects.
-        MediaPipe handedness is mirrored for selfie view.
-        """
-        self.left_hand.landmarks = []
+        self.left_hand.landmarks  = []
         self.right_hand.landmarks = []
 
         if not results.multi_hand_landmarks:
@@ -187,77 +159,117 @@ class GestureEngine:
             results.multi_hand_landmarks,
             results.multi_handedness
         ):
-            lm = hand_lm.landmark
-            label = hand_info.classification[0].label  # "Left" or "Right"
-            # In selfie/mirror view, MediaPipe flips labels — we un-flip:
-            # "Right" from MediaPipe = person's left hand (from camera's perspective)
-            if label == "Right":
+            lm    = hand_lm.landmark
+            label = hand_info.classification[0].label
+
+            # After cv2.flip(frame,1), MediaPipe "Right" = user's LEFT hand.
+            # --mirror inverts this for cameras that are already flipped.
+            is_users_left = (label == "Right") if not self.mirror else (label == "Left")
+
+            if is_users_left:
                 self.left_hand.landmarks = lm
-                self.left_hand.x_norm = lm[0].x
-                self.left_hand.y_norm = lm[0].y
+                self.left_hand.x_norm   = lm[0].x
+                self.left_hand.y_norm   = lm[0].y
             else:
                 self.right_hand.landmarks = lm
-                self.right_hand.x_norm = lm[0].x
-                self.right_hand.y_norm = lm[0].y
+                self.right_hand.x_norm   = lm[0].x
+                self.right_hand.y_norm   = lm[0].y
 
-    # ── GESTURE → ACTION ─────────────────────────────────────────
+    # ── GESTURE STATE UPDATE ─────────────────────────────────────
 
-    def _process_hand_gesture(self, hand: HandState, handedness: str, is_left: bool):
-        """Update gesture state and detect new gestures"""
+    def _update_hand(self, hand: HandState):
         if not hand.landmarks:
-            hand.gesture = Gesture.NEUTRAL
+            hand.gesture        = Gesture.NEUTRAL
             hand.gesture_frames = 0
-            hand.is_waving = False
+            hand.is_waving      = False
             return
 
-        new_gesture = self.classify_gesture(hand.landmarks, handedness)
+        new_g = self.classify_gesture(hand.landmarks)
 
-        # Track wave history (wrist x)
         hand.wave_history.append(hand.landmarks[0].x)
         if len(hand.wave_history) > 20:
             hand.wave_history.pop(0)
         hand.is_waving = self._detect_wave(hand)
 
-        if new_gesture == hand.gesture:
+        if new_g == hand.gesture:
             hand.gesture_frames += 1
         else:
-            hand.prev_gesture = hand.gesture
-            hand.gesture = new_gesture
+            hand.prev_gesture   = hand.gesture
+            hand.gesture        = new_g
             hand.gesture_frames = 0
 
+    # ── MODE SWITCH ──────────────────────────────────────────────
+
     def _handle_thumbs_up(self):
-        """Switch between drum and violin mode"""
         now = time.time()
         if now - self.last_thumbs_time < self.THUMBS_DEBOUNCE:
             return
         self.last_thumbs_time = now
+        self.sound.stop_loop("violin")
 
         if self.mode == Mode.DRUMS:
-            self.mode = Mode.VIOLIN
-            if self.voice:
-                import threading
-                threading.Thread(target=self.voice.speak,
-                                 args=("Switching to violin",), daemon=True).start()
+            self.mode  = Mode.VIOLIN
+            phrase     = "Switching to violin"
         else:
-            self.mode = Mode.DRUMS
-            if self.voice:
-                import threading
-                threading.Thread(target=self.voice.speak,
-                                 args=("Switching to drums",), daemon=True).start()
+            self.mode  = Mode.DRUMS
+            phrase     = "Switching to drums"
 
-    def _fire_drum(self, sample_name: str, hand: HandState):
-        """Trigger a drum hit with debounce"""
+        if self.voice:
+            threading.Thread(target=self.voice.speak,
+                             args=(phrase,), daemon=True).start()
+
+    # ── DRUM DISPATCH ────────────────────────────────────────────
+
+    def _fire(self, sample, hand: HandState):
         now = time.time()
         if now - hand.last_trigger_time < self.TRIGGER_DEBOUNCE:
             return
         hand.last_trigger_time = now
-        vol = 1.0 - self.right_hand.y_norm  # right hand height = volume
-        vol = max(0.1, min(1.0, vol))
-        self.sound.play(sample_name, volume=vol)
+        vol = max(0.15, min(1.0, 1.0 - self.right_hand.y_norm))
+        self.sound.play(sample, volume=vol)
 
-    def _update_violin(self):
-        """Update violin note based on left hand height (continuous)"""
-        if not self.left_hand.landmarks:
+    def _dispatch_drums(self):
+        for hand in (self.left_hand, self.right_hand):
+            if (hand.gesture == Gesture.THUMBS_UP and
+                    hand.gesture_frames == self.GESTURE_CONFIRM_FRAMES):
+                self._handle_thumbs_up()
+                return
+
+        lh = self.left_hand
+        if lh.gesture_frames == self.GESTURE_CONFIRM_FRAMES:
+            hit = {
+                Gesture.FIST:          "kick",
+                Gesture.ONE_FINGER:    "snare",
+                Gesture.TWO_FINGERS:   "hihat",
+                Gesture.THREE_FINGERS: "tom",
+                Gesture.OPEN_PALM:     "crash",
+                Gesture.PINCH:         "rimshot",
+            }.get(lh.gesture)
+            if hit:
+                self._fire(hit, lh)
+
+        rh = self.right_hand
+        if rh.gesture_frames == self.GESTURE_CONFIRM_FRAMES:
+            hit = {
+                Gesture.FIST:        "kick",
+                Gesture.ONE_FINGER:  "hihat_open",
+                Gesture.TWO_FINGERS: "hihat",
+                Gesture.OPEN_PALM:   "crash",
+            }.get(rh.gesture)
+            if hit:
+                self._fire(hit, rh)
+
+    # ── VIOLIN DISPATCH ──────────────────────────────────────────
+
+    def _dispatch_violin(self):
+        for hand in (self.left_hand, self.right_hand):
+            if (hand.gesture == Gesture.THUMBS_UP and
+                    hand.gesture_frames == self.GESTURE_CONFIRM_FRAMES):
+                self._handle_thumbs_up()
+                return
+
+        if self.left_hand.gesture == Gesture.FIST:
+            self.sound.stop_loop("violin")
             return
 
         now = time.time()
@@ -265,81 +277,53 @@ class GestureEngine:
             return
         self.last_violin_time = now
 
-        # Mute on fist
-        if self.left_hand.gesture == Gesture.FIST:
-            self.sound.stop_loop("violin")
+        if not self.left_hand.landmarks:
             return
 
-        # Map Y position to pentatonic scale notes
-        # y_norm: 0 = top of frame (high pitch), 1 = bottom (low pitch)
-        y = self.left_hand.y_norm
-        notes = ["violin_A3", "violin_C4", "violin_D4", "violin_E4",
-                 "violin_G4", "violin_A4", "violin_C5", "violin_D5"]
-        note_idx = int((1.0 - y) * (len(notes) - 1))
-        note_idx = max(0, min(len(notes) - 1, note_idx))
+        notes = ["violin_A3","violin_C4","violin_D4","violin_E4",
+                 "violin_G4","violin_A4","violin_C5","violin_D5"]
+        idx  = int((1.0 - self.left_hand.y_norm) * (len(notes)-1))
+        idx  = max(0, min(len(notes)-1, idx))
+        vol  = max(0.05, min(1.0,
+               1.0 - self.right_hand.y_norm if self.right_hand.landmarks else 0.7))
 
-        vol = 1.0 - self.right_hand.y_norm if self.right_hand.landmarks else 0.7
-        vol = max(0.05, min(1.0, vol))
-
-        # Vibrato from waving
-        vibrato = self.left_hand.is_waving
-
-        if note_idx != self.last_violin_note:
-            self.last_violin_note = note_idx
-            self.sound.play_loop("violin", notes[note_idx], volume=vol, vibrato=vibrato)
+        if idx != self.last_violin_note:
+            self.last_violin_note = idx
+            self.sound.play_loop("violin", notes[idx], volume=vol,
+                                 vibrato=self.left_hand.is_waving)
         else:
             self.sound.set_loop_volume("violin", vol)
 
-    # ── ACTIONS PER MODE ─────────────────────────────────────────
+    # ── LABELS FOR HUD ───────────────────────────────────────────
 
-    def _dispatch_drums(self):
-        """Map current gestures to drum hits"""
-        # Check both hands for thumbs up (mode switch)
-        for hand, hn in [(self.left_hand, "Right"), (self.right_hand, "Left")]:
-            if (hand.gesture == Gesture.THUMBS_UP and
-                    hand.gesture_frames == self.GESTURE_CONFIRM_FRAMES):
-                self._handle_thumbs_up()
-                return
+    DRUM_MAP = {
+        Gesture.FIST:          "KICK",
+        Gesture.ONE_FINGER:    "SNARE",
+        Gesture.TWO_FINGERS:   "HI-HAT",
+        Gesture.THREE_FINGERS: "TOM",
+        Gesture.OPEN_PALM:     "CRASH",
+        Gesture.PINCH:         "RIMSHOT",
+        Gesture.THUMBS_UP:     "SWITCH →",
+        Gesture.NEUTRAL:       "—",
+        Gesture.WAVE:          "—",
+    }
+    VIOLIN_MAP = {
+        Gesture.FIST:          "MUTE",
+        Gesture.OPEN_PALM:     "BOW",
+        Gesture.WAVE:          "VIBRATO",
+        Gesture.THUMBS_UP:     "SWITCH →",
+        Gesture.NEUTRAL:       "BOW",
+        Gesture.ONE_FINGER:    "BOW",
+        Gesture.TWO_FINGERS:   "BOW",
+        Gesture.THREE_FINGERS: "BOW",
+        Gesture.PINCH:         "MUTE",
+    }
 
-        # Drum mapping on LEFT hand (dominant rhythm hand)
-        lh = self.left_hand
-        if lh.gesture_frames == self.GESTURE_CONFIRM_FRAMES:
-            if lh.gesture == Gesture.FIST:
-                self._fire_drum("kick", lh)
-            elif lh.gesture == Gesture.ONE_FINGER:
-                self._fire_drum("snare", lh)
-            elif lh.gesture == Gesture.TWO_FINGERS:
-                self._fire_drum("hihat", lh)
-            elif lh.gesture == Gesture.THREE_FINGERS:
-                self._fire_drum("tom", lh)
-            elif lh.gesture == Gesture.OPEN_PALM:
-                self._fire_drum("crash", lh)
-            elif lh.gesture == Gesture.PINCH:
-                self._fire_drum("rimshot", lh)
-
-        # Right hand: alternate hits for layering
-        rh = self.right_hand
-        if rh.gesture_frames == self.GESTURE_CONFIRM_FRAMES:
-            if rh.gesture == Gesture.FIST:
-                self._fire_drum("kick", rh)
-            elif rh.gesture == Gesture.ONE_FINGER:
-                self._fire_drum("hihat_open", rh)
-            elif rh.gesture == Gesture.TWO_FINGERS:
-                self._fire_drum("hihat", rh)
-            elif rh.gesture == Gesture.OPEN_PALM:
-                self._fire_drum("crash", rh)
-
-    def _dispatch_violin(self):
-        """Update violin continuous play"""
-        # Check for mode switch
-        for hand, hn in [(self.left_hand, "Right"), (self.right_hand, "Left")]:
-            if (hand.gesture == Gesture.THUMBS_UP and
-                    hand.gesture_frames == self.GESTURE_CONFIRM_FRAMES):
-                self.sound.stop_loop("violin")
-                self._handle_thumbs_up()
-                return
-
-        self._update_violin()
+    def _gesture_label(self, hand: HandState) -> str:
+        m = self.DRUM_MAP if self.mode == Mode.DRUMS else self.VIOLIN_MAP
+        if hand.is_waving and self.mode == Mode.VIOLIN:
+            return "VIBRATO"
+        return m.get(hand.gesture, "—")
 
     # ── MAIN LOOP ────────────────────────────────────────────────
 
@@ -349,43 +333,44 @@ class GestureEngine:
             if not ret:
                 break
 
-            frame = cv2.flip(frame, 1)  # mirror for natural feel
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = cv2.flip(frame, 1)
+            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             rgb.flags.writeable = False
             results = self.hands.process(rgb)
             rgb.flags.writeable = True
 
             self._assign_hands(results)
-            self._process_hand_gesture(self.left_hand, "Right", is_left=True)
-            self._process_hand_gesture(self.right_hand, "Left", is_left=False)
+            self._update_hand(self.left_hand)
+            self._update_hand(self.right_hand)
 
-            # Dispatch actions based on mode
             if self.mode == Mode.DRUMS:
                 self._dispatch_drums()
             else:
                 self._dispatch_violin()
 
-            # Draw skeleton overlays
+            self.left_label  = self._gesture_label(self.left_hand)
+            self.right_label = self._gesture_label(self.right_hand)
+
             if results.multi_hand_landmarks:
                 for hand_lm, hand_info in zip(
-                    results.multi_hand_landmarks, results.multi_handedness
+                    results.multi_hand_landmarks,
+                    results.multi_handedness
                 ):
-                    label = hand_info.classification[0].label
-                    color = (0, 255, 160) if label == "Right" else (255, 180, 0)
+                    label     = hand_info.classification[0].label
+                    is_left   = (label == "Right") if not self.mirror else (label == "Left")
+                    color     = (0, 255, 160) if is_left else (255, 180, 0)
                     self._draw_hand(frame, hand_lm, color)
 
-            # FPS counter
             self.frame_count += 1
             now = time.time()
             if now - self.fps_time >= 1.0:
-                self.fps = self.frame_count
+                self.fps        = self.frame_count
                 self.frame_count = 0
-                self.fps_time = now
+                self.fps_time   = now
 
-            # Draw HUD overlay
             self.overlay.draw(frame, self)
-
             cv2.imshow("GESTURE.DJ", frame)
+
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:
                 break
@@ -394,22 +379,15 @@ class GestureEngine:
         cv2.destroyAllWindows()
 
     def _draw_hand(self, frame, hand_lm, color):
-        """Draw hand skeleton with custom color"""
         h, w = frame.shape[:2]
-        lm = hand_lm.landmark
-
-        # Draw connections
-        connections = self.mp_hands.HAND_CONNECTIONS
-        for conn in connections:
-            p1 = lm[conn[0]]
-            p2 = lm[conn[1]]
-            x1, y1 = int(p1.x * w), int(p1.y * h)
-            x2, y2 = int(p2.x * w), int(p2.y * h)
-            cv2.line(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
-
-        # Draw landmark dots
-        for i, point in enumerate(lm):
-            x, y = int(point.x * w), int(point.y * h)
-            # Fingertips slightly larger
-            r = 5 if i in (4, 8, 12, 16, 20) else 3
-            cv2.circle(frame, (x, y), r, color, -1, cv2.LINE_AA)
+        lm   = hand_lm.landmark
+        for conn in self.mp_hands.HAND_CONNECTIONS:
+            p1 = lm[conn[0]]; p2 = lm[conn[1]]
+            cv2.line(frame,
+                     (int(p1.x*w), int(p1.y*h)),
+                     (int(p2.x*w), int(p2.y*h)),
+                     color, 2, cv2.LINE_AA)
+        for i, pt in enumerate(lm):
+            r = 5 if i in (4,8,12,16,20) else 3
+            cv2.circle(frame, (int(pt.x*w), int(pt.y*h)),
+                       r, color, -1, cv2.LINE_AA)

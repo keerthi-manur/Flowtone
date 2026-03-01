@@ -1,41 +1,16 @@
 """
 download_samples.py
-Downloads free, license-clear drum + violin samples.
-Run this ONCE before starting the app.
-
-Sources used:
-  - Drums: Freesound.org CC0 samples
-  - Violin: Freesound.org CC0 samples
-
-If any download fails, you can manually place .wav files in ./samples/
-with these names:
-  kick.wav, snare.wav, hihat.wav, hihat_open.wav, tom.wav,
-  crash.wav, rimshot.wav,
-  violin_A3.wav, violin_C4.wav, violin_D4.wav, violin_E4.wav,
-  violin_G4.wav, violin_A4.wav, violin_C5.wav, violin_D5.wav
+Generates drum + violin samples locally using numpy synthesis.
+Run once before starting the app.
 """
 
 import os
-import urllib.request
-import sys
+import wave
+import numpy as np
 
 SAMPLES_DIR = "samples"
+SR = 44100  # sample rate
 
-# Free CC0 samples from various sources.
-# We use synthesized/generated fallbacks if downloads fail.
-SAMPLES = {
-    # Drums — classic 808/909 style free samples
-    "kick":       "https://freesound.org/data/previews/209/209235_921947-lq.mp3",
-    "snare":      "https://freesound.org/data/previews/387/387186_1474204-lq.mp3",
-    "hihat":      "https://freesound.org/data/previews/204/204929_1693665-lq.mp3",
-    "hihat_open": "https://freesound.org/data/previews/204/204930_1693665-lq.mp3",
-    "tom":        "https://freesound.org/data/previews/262/262090_1186165-lq.mp3",
-    "crash":      "https://freesound.org/data/previews/360/360714_5450487-lq.mp3",
-    "rimshot":    "https://freesound.org/data/previews/209/209236_921947-lq.mp3",
-}
-
-# Violin notes — we'll generate these with numpy/scipy as pure sine waves
-# if scipy isn't available, or use pre-made ones if you have them.
 VIOLIN_NOTES = {
     "violin_A3": 220.00,
     "violin_C4": 261.63,
@@ -48,187 +23,189 @@ VIOLIN_NOTES = {
 }
 
 
-def generate_violin_sample(filename: str, freq: float, duration: float = 2.0,
-                             sample_rate: int = 44100):
-    """
-    Generate a violin-like tone using additive synthesis.
-    Combines multiple harmonics with a bow-like envelope.
-    Much better than a pure sine wave.
-    """
-    import numpy as np
-    import wave
-    import struct
-
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-
-    # Additive synthesis: fundamental + harmonics with decreasing amplitude
-    # Violin has strong odd harmonics
-    harmonics = [
-        (1, 1.0),    # fundamental
-        (2, 0.5),    # 2nd harmonic
-        (3, 0.7),    # 3rd (strong in violin)
-        (4, 0.2),
-        (5, 0.4),    # 5th (strong in violin)
-        (6, 0.1),
-        (7, 0.2),
-    ]
-
-    signal = np.zeros_like(t)
-    for harmonic, amp in harmonics:
-        signal += amp * np.sin(2 * np.pi * freq * harmonic * t)
-
-    # Bow envelope: fast attack, sustain, gentle release
-    attack = int(0.03 * sample_rate)
-    release = int(0.3 * sample_rate)
-    sustain_val = 0.85
-
-    envelope = np.ones_like(t) * sustain_val
-    envelope[:attack] = np.linspace(0, sustain_val, attack)
-    envelope[-release:] = np.linspace(sustain_val, 0, release)
-
-    # Slight vibrato (5 Hz, ±1% pitch variation)
-    vibrato = 1 + 0.008 * np.sin(2 * np.pi * 5 * t)
-    # Apply vibrato to phase (approximate)
-    signal = envelope * np.sin(2 * np.pi * freq * vibrato * t)
-    for harmonic, amp in harmonics[1:]:
-        signal += envelope * amp * 0.3 * np.sin(2 * np.pi * freq * harmonic * vibrato * t)
-
-    signal *= envelope
-
-    # Normalize
-    peak = np.max(np.abs(signal))
-    if peak > 0:
-        signal = signal / peak * 0.85
-
-    # Convert to 16-bit PCM
-    samples = (signal * 32767).astype(np.int16)
-    stereo = np.column_stack([samples, samples])
-
-    with wave.open(filename, 'w') as wf:
+def save_wav(path, signal, sr=SR):
+    signal = np.clip(signal, -1, 1)
+    data   = (signal * 32767).astype(np.int16)
+    stereo = np.column_stack([data, data])
+    with wave.open(path, 'w') as wf:
         wf.setnchannels(2)
         wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
+        wf.setframerate(sr)
         wf.writeframes(stereo.tobytes())
 
-    print(f"  ✓ Generated {os.path.basename(filename)} ({freq:.1f} Hz)")
+
+def t_arr(duration):
+    return np.linspace(0, duration, int(SR * duration), endpoint=False)
 
 
-def generate_drum_fallback(filename: str, drum_type: str, sample_rate: int = 44100):
-    """Generate basic drum sounds using numpy if downloads fail."""
-    import numpy as np
-    import wave
+# ── DRUM GENERATORS ──────────────────────────────────────────────
 
-    duration = 0.5
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+def make_kick():
+    """808-style kick: pitch sweep from 150Hz → 40Hz with punchy transient"""
+    t   = t_arr(0.55)
+    # Frequency sweep
+    freq = 150 * np.exp(-18 * t) + 40
+    phase = np.cumsum(2 * np.pi * freq / SR)
+    tone  = np.sin(phase)
+    # Click transient at start
+    click = np.exp(-80 * t) * 0.6
+    # Body envelope
+    env   = np.exp(-6 * t) * 0.95
+    # Slight distortion for punch
+    sig   = np.tanh((tone * env + click) * 1.5) / 1.5
+    return sig * 0.9
 
-    if drum_type == "kick":
-        # Pitch-swept sine — classic 808 kick
-        freq = 150 * np.exp(-15 * t)
-        signal = np.sin(2 * np.pi * freq * t)
-        env = np.exp(-8 * t)
-        signal = signal * env * 0.95
 
-    elif drum_type == "snare":
-        # White noise + tone
-        noise = np.random.randn(len(t)) * 0.5
-        tone = np.sin(2 * np.pi * 200 * t) * 0.5
-        env = np.exp(-10 * t)
-        signal = (noise + tone) * env * 0.8
+def make_snare():
+    """Snare: sharp crack tone + tuned noise burst, short decay"""
+    t     = t_arr(0.35)
+    # Tuned body (two tones for that snare character)
+    body  = (np.sin(2*np.pi*185*t) * 0.5 +
+             np.sin(2*np.pi*230*t) * 0.3)
+    body_env = np.exp(-22 * t)
+    # Noise component (the "snare wires")
+    noise    = np.random.randn(len(t)) * 0.6
+    noise_env = np.exp(-14 * t)
+    # Combine with transient
+    sig = body * body_env + noise * noise_env
+    # Normalize and add click
+    sig += np.exp(-120 * t) * 0.4
+    return sig * 0.85
 
-    elif drum_type in ("hihat", "hihat_open"):
-        # Filtered noise
-        noise = np.random.randn(len(t))
-        # Simple highpass: subtract low freq component
-        from numpy.fft import fft, ifft, fftfreq
-        F = fft(noise)
-        freqs = fftfreq(len(noise), 1 / sample_rate)
-        F[np.abs(freqs) < 3000] = 0
-        noise = np.real(ifft(F))
-        decay = 5 if drum_type == "hihat" else 1.5
-        env = np.exp(-decay * t)
-        signal = noise * env * 0.6
 
-    elif drum_type == "tom":
-        freq = 90 * np.exp(-8 * t)
-        signal = np.sin(2 * np.pi * freq * t)
-        env = np.exp(-5 * t)
-        signal = signal * env * 0.9
+def make_hihat(open_hat=False):
+    """Hi-hat: filtered white noise, very short (closed) or longer (open)"""
+    dur   = 0.5 if open_hat else 0.09
+    t     = t_arr(dur)
+    noise = np.random.randn(len(t))
+    # Simple high-pass: subtract smoothed version
+    from numpy.fft import rfft, irfft, rfftfreq
+    F     = rfft(noise)
+    freqs = rfftfreq(len(noise), 1/SR)
+    F[freqs < 6000] *= (freqs[freqs < 6000] / 6000) ** 2  # roll off below 6kHz
+    noise = irfft(F, n=len(t))
+    decay = 3 if open_hat else 60
+    env   = np.exp(-decay * t)
+    return noise * env * (0.55 if open_hat else 0.45)
 
-    elif drum_type == "crash":
-        noise = np.random.randn(len(t))
-        env = np.exp(-2 * t)
-        signal = noise * env * 0.7
 
-    elif drum_type == "rimshot":
-        tone = np.sin(2 * np.pi * 400 * t)
-        noise = np.random.randn(len(t)) * 0.3
-        env = np.exp(-20 * t)
-        signal = (tone + noise) * env * 0.8
+def make_tom():
+    """Floor tom: low pitch sweep, more resonance than kick"""
+    t    = t_arr(0.45)
+    freq = 100 * np.exp(-8 * t) + 55
+    phase = np.cumsum(2 * np.pi * freq / SR)
+    tone  = np.sin(phase) + 0.3 * np.sin(2 * phase)
+    env   = np.exp(-7 * t)
+    noise = np.random.randn(len(t)) * 0.05 * np.exp(-20 * t)
+    return (tone * env + noise) * 0.88
 
-    else:
-        signal = np.zeros(len(t))
 
-    # Normalize + convert
-    peak = np.max(np.abs(signal))
-    if peak > 0:
-        signal = signal / peak * 0.85
-    samples = (signal * 32767).astype(np.int16)
-    stereo = np.column_stack([samples, samples])
+def make_crash():
+    """Crash cymbal: complex metallic noise, long ring"""
+    t     = t_arr(1.8)
+    noise = np.random.randn(len(t))
+    # Multiple resonant frequencies for metallic character
+    freqs = [214, 428, 635, 891, 1200, 1680, 2400]
+    ring  = sum(np.sin(2*np.pi*f*t) * np.exp(-(2+i*0.3)*t)
+                for i, f in enumerate(freqs))
+    from numpy.fft import rfft, irfft, rfftfreq
+    F     = rfft(noise)
+    freqs_arr = rfftfreq(len(noise), 1/SR)
+    F[freqs_arr < 3000] = 0
+    noise = irfft(F, n=len(t))
+    env   = np.exp(-1.8 * t)
+    sig   = (noise * 0.6 + ring * 0.4) * env
+    return sig * 0.7
 
-    with wave.open(filename, 'w') as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(stereo.tobytes())
 
-    print(f"  ✓ Generated {os.path.basename(filename)} (synthesized {drum_type})")
+def make_rimshot():
+    """Rimshot: sharp high-pitched crack, very short"""
+    t    = t_arr(0.18)
+    tone = np.sin(2*np.pi*800*t) * 0.5 + np.sin(2*np.pi*1200*t) * 0.3
+    env  = np.exp(-35 * t)
+    noise = np.random.randn(len(t)) * 0.3 * np.exp(-40 * t)
+    return (tone * env + noise) * 0.8
 
+
+# ── VIOLIN GENERATOR ─────────────────────────────────────────────
+
+def make_violin(freq, duration=2.5):
+    """
+    Violin-like additive synthesis with bow attack envelope.
+    Strong odd harmonics, slight vibrato, bow noise.
+    """
+    t = t_arr(duration)
+
+    # Additive harmonics (violin favors odd)
+    harmonics = [(1,1.0),(2,0.4),(3,0.7),(4,0.15),(5,0.5),(6,0.08),(7,0.3)]
+    sig = sum(amp * np.sin(2*np.pi*freq*h*t) for h, amp in harmonics)
+
+    # Vibrato: 5Hz, subtle
+    vibrato  = 1 + 0.007 * np.sin(2*np.pi*5.2*t)
+    sig_vib  = sum(amp * np.sin(2*np.pi*freq*h*vibrato*t)
+                   for h, amp in harmonics)
+
+    # Blend non-vibrato (attack) into vibrato (sustain)
+    blend_frames = int(0.25 * SR)
+    blend = np.zeros(len(t))
+    blend[:blend_frames] = np.linspace(0, 1, blend_frames)
+    blend[blend_frames:] = 1.0
+    sig = sig * (1-blend) + sig_vib * blend
+
+    # Bow envelope: slow attack (string catches bow), sustain, release
+    attack  = int(0.06 * SR)
+    release = int(0.35 * SR)
+    env     = np.ones(len(t)) * 0.88
+    env[:attack]   = np.linspace(0, 0.88, attack)
+    env[-release:] = np.linspace(0.88, 0, release)
+
+    # Bow rosin noise (very subtle)
+    bow_noise = np.random.randn(len(t)) * 0.025
+    bow_env   = np.exp(-3 * t) * 0.5 + 0.5
+    sig = (sig + bow_noise * bow_env) * env
+
+    return sig * 0.82
+
+
+# ── MAIN ─────────────────────────────────────────────────────────
 
 def main():
     os.makedirs(SAMPLES_DIR, exist_ok=True)
-    print(f"\n📁 Generating/downloading samples into ./{SAMPLES_DIR}/\n")
+    print(f"\n📁 Generating samples into ./{SAMPLES_DIR}/\n")
 
-    # Check numpy available (required for synthesis)
-    try:
-        import numpy as np
-        has_numpy = True
-    except ImportError:
-        has_numpy = False
-        print("⚠️  numpy not found — install it for sample generation: pip install numpy")
+    drums = {
+        "kick":       make_kick,
+        "snare":      make_snare,
+        "hihat":      make_hihat,
+        "hihat_open": lambda: make_hihat(open_hat=True),
+        "tom":        make_tom,
+        "crash":      make_crash,
+        "rimshot":    make_rimshot,
+    }
 
-    # Generate violin samples (always synthesized — consistent quality)
-    print("🎻 Generating violin samples...")
+    print("🥁 Drums:")
+    for name, fn in drums.items():
+        path = os.path.join(SAMPLES_DIR, f"{name}.wav")
+        if os.path.exists(path):
+            print(f"  ↷ {name}.wav exists, skipping")
+            continue
+        sig = fn()
+        save_wav(path, sig)
+        print(f"  ✓ {name}")
+
+    print("\n🎻 Violin:")
     for name, freq in VIOLIN_NOTES.items():
         path = os.path.join(SAMPLES_DIR, f"{name}.wav")
         if os.path.exists(path):
-            print(f"  ↷ {name}.wav already exists, skipping")
+            print(f"  ↷ {name}.wav exists, skipping")
             continue
-        if has_numpy:
-            generate_violin_sample(path, freq)
-        else:
-            print(f"  ✗ Skipped {name} (numpy required)")
+        sig = make_violin(freq)
+        save_wav(path, sig)
+        print(f"  ✓ {name}  ({freq:.1f} Hz)")
 
-    # Generate drum samples
-    print("\n🥁 Generating drum samples...")
-    drum_types = {
-        "kick": "kick", "snare": "snare", "hihat": "hihat",
-        "hihat_open": "hihat_open", "tom": "tom",
-        "crash": "crash", "rimshot": "rimshot",
-    }
-
-    for name, drum_type in drum_types.items():
-        path = os.path.join(SAMPLES_DIR, f"{name}.wav")
-        if os.path.exists(path):
-            print(f"  ↷ {name}.wav already exists, skipping")
-            continue
-        if has_numpy:
-            generate_drum_fallback(path, drum_type)
-        else:
-            print(f"  ✗ Skipped {name} (numpy required)")
-
-    print(f"\n✅ Done! {len(os.listdir(SAMPLES_DIR))} files in ./{SAMPLES_DIR}/")
-    print("\nTip: Replace any .wav with your own real samples for better sound.")
-    print("     Just keep the same filenames.\n")
+    total = len(os.listdir(SAMPLES_DIR))
+    print(f"\n✅ Done — {total} files in ./{SAMPLES_DIR}/")
+    print("   Tip: replace any .wav with a real recording using the same filename.\n")
 
 
 if __name__ == "__main__":
