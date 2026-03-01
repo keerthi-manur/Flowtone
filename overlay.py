@@ -17,23 +17,23 @@ DIM    = (70, 85, 90)
 BLACK  = (0, 0, 0)
 YELLOW = (0, 220, 255)
 
-PENTATONIC = ["A3","C4","D4","E4","G4","A4","C5","D5"]
+PENTATONIC = ["A4","B4","C4","D4","E4","F4","G4","A5","B5","C5","D5","E5","F5","G5"]
 
 DRUM_LEGEND = [
     ("LEFT HAND",  ""),
-    ("✊ Fist",     "Kick"),
+    ("✊ Fist",     "rest position"),
     ("☝ 1 finger", "Snare"),
     ("✌ 2 fingers","Hi-Hat"),
-    ("3 fingers",  "Tom"),
-    ("🖐 Palm",    "Crash"),
-    ("👌 Pinch",   "Rimshot"),
+    ("3 fingers",  "Bass Drum"),
+    ("🖐 Palm",    "Hand Cymbals"),
     ("",           ""),
     ("RIGHT HAND", ""),
-    ("✊ Fist",    "Kick"),
-    ("☝ 1 finger", "Hi-Hat Open"),
-    ("🖐 Palm",    "Crash"),
+    ("☝ 1 finger", "Snare 2"),
+    ("✌ 2 fingers","Tambourine"),
+    ("3 fingers",  "Djembe"),
+    ("🖐 Palm",    "Clash Cymbals"),
     ("",           ""),
-    ("👍 Thumbs",  "→ Violin mode"),
+    ("👍 Both thumbs", "→ Switch mode"),
 ]
 
 VIOLIN_LEGEND = [
@@ -45,7 +45,7 @@ VIOLIN_LEGEND = [
     ("RIGHT HAND", ""),
     ("↕ Height",   "Volume"),
     ("",           ""),
-    ("👍 Thumbs",  "→ Drum mode"),
+    ("👍 Both thumbs", "→ Switch mode"),
 ]
 
 
@@ -165,7 +165,3 @@ class Overlay:
         else:
             _alpha_rect(frame, rx, 44, 160, 30, (0,0,0), alpha=0.4)
             _text(frame, "RIGHT — not detected", rx+8, 63, DIM, scale=0.36)
-
-        # ── CENTER DIVIDER ───────────────────────────────────────
-        cv2.line(frame, (fw//2, 36), (fw//2, fh),
-                 (25, 35, 40), 1, cv2.LINE_AA)

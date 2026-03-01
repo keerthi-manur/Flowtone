@@ -39,14 +39,18 @@ class HandState:
     y_norm: float = 0.5
     x_norm: float = 0.5
     wave_history: list = field(default_factory=list)
+    gesture_history: list = field(default_factory=list)  # recent gesture window
     is_waving: bool = False
     last_trigger_time: float = 0.0
+    last_fired_gesture: Gesture = Gesture.NEUTRAL
+    fired: bool = False
 
 
 class GestureEngine:
-    GESTURE_CONFIRM_FRAMES = 4
-    TRIGGER_DEBOUNCE       = 0.22
-    VIOLIN_UPDATE_INTERVAL = 0.05
+    GESTURE_CONFIRM_FRAMES = 5
+    GESTURE_CONFIRM_THRESH = 3
+    THUMBS_CONFIRM_FRAMES  = 10   # ~0.67s at 30fps — must hold deliberately
+    VIOLIN_UPDATE_INTERVAL = 0.15  # seconds between note changes
     THUMBS_DEBOUNCE        = 1.2
     WAVE_WINDOW            = 14
     WAVE_THRESHOLD         = 0.06
@@ -74,9 +78,13 @@ class GestureEngine:
         self.left_hand  = HandState()
         self.right_hand = HandState()
 
-        self.last_thumbs_time = 0.0
-        self.last_violin_time = 0.0
-        self.last_violin_note = -1
+        self.last_thumbs_time      = 0.0
+        self.last_violin_time      = 0.0
+        self.last_violin_note      = -1
+        self._violin_changes       = []
+        self._violin_settled_since = 0.0
+        self._using_long           = False
+        self._switch_armed         = False
 
         self.frame_count = 0
         self.fps         = 0
@@ -88,7 +96,7 @@ class GestureEngine:
     # ── LANDMARK HELPERS ─────────────────────────────────────────
 
     def _finger_up(self, lm, tip, pip):
-        return lm[tip].y < lm[pip].y - 0.02
+        return lm[tip].y < lm[pip].y  # removed 0.02 margin — any extension counts
 
     def _count_fingers(self, lm):
         return sum(self._finger_up(lm, t, p)
@@ -184,9 +192,11 @@ class GestureEngine:
 
     def _update_hand(self, hand: HandState):
         if not hand.landmarks:
-            hand.gesture        = Gesture.NEUTRAL
-            hand.gesture_frames = 0
-            hand.is_waving      = False
+            hand.prev_gesture    = hand.gesture
+            hand.gesture         = Gesture.NEUTRAL
+            hand.gesture_frames  = 0
+            hand.gesture_history = []
+            hand.is_waving       = False
             return
 
         new_g = self.classify_gesture(hand.landmarks)
@@ -196,12 +206,53 @@ class GestureEngine:
             hand.wave_history.pop(0)
         hand.is_waving = self._detect_wave(hand)
 
-        if new_g == hand.gesture:
-            hand.gesture_frames += 1
+        # Rolling majority vote over last N frames
+        hand.gesture_history.append(new_g)
+        if len(hand.gesture_history) > self.GESTURE_CONFIRM_FRAMES:
+            hand.gesture_history.pop(0)
+
+        if len(hand.gesture_history) == self.GESTURE_CONFIRM_FRAMES:
+            from collections import Counter
+            majority, count = Counter(hand.gesture_history).most_common(1)[0]
+            stable = majority if count >= self.GESTURE_CONFIRM_THRESH else Gesture.NEUTRAL
         else:
+            stable = Gesture.NEUTRAL
+
+        if stable != hand.gesture:
             hand.prev_gesture   = hand.gesture
-            hand.gesture        = new_g
+            hand.gesture        = stable
             hand.gesture_frames = 0
+        else:
+            hand.gesture_frames += 1
+
+    def _should_fire(self, hand: HandState) -> bool:
+        # Fire on frame 1 after a new stable gesture (frame 0 is the transition frame)
+        if hand.gesture == Gesture.NEUTRAL:
+            return False
+        if hand.gesture_frames != 1:
+            return False
+        now = time.time()
+        same_gesture = (hand.gesture == hand.last_fired_gesture)
+        enough_time  = (now - hand.last_trigger_time) > 0.18
+        if same_gesture and not enough_time:
+            return False
+        hand.last_fired_gesture = hand.gesture
+        hand.last_trigger_time  = now
+        return True
+
+    def _check_mode_switch(self):
+        """Switch mode only when both hands show thumbs up simultaneously"""
+        both_thumbs = (
+            self.left_hand.gesture == Gesture.THUMBS_UP and
+            self.right_hand.gesture == Gesture.THUMBS_UP and
+            self.left_hand.gesture_frames >= self.THUMBS_CONFIRM_FRAMES and
+            self.right_hand.gesture_frames >= self.THUMBS_CONFIRM_FRAMES
+        )
+        if both_thumbs and not self._switch_armed:
+            self._switch_armed = True
+            self._handle_thumbs_up()
+        elif not both_thumbs:
+            self._switch_armed = False
 
     # ── MODE SWITCH ──────────────────────────────────────────────
 
@@ -225,54 +276,40 @@ class GestureEngine:
 
     # ── DRUM DISPATCH ────────────────────────────────────────────
 
-    def _fire(self, sample, hand: HandState):
-        now = time.time()
-        if now - hand.last_trigger_time < self.TRIGGER_DEBOUNCE:
-            return
-        hand.last_trigger_time = now
-        vol = max(0.15, min(1.0, 1.0 - self.right_hand.y_norm))
-        self.sound.play(sample, volume=vol)
-
     def _dispatch_drums(self):
-        for hand in (self.left_hand, self.right_hand):
-            if (hand.gesture == Gesture.THUMBS_UP and
-                    hand.gesture_frames == self.GESTURE_CONFIRM_FRAMES):
-                self._handle_thumbs_up()
-                return
+        self._check_mode_switch()
 
-        lh = self.left_hand
-        # Fire once gesture is confirmed, then again whenever debounce clears
-        if lh.gesture_frames >= self.GESTURE_CONFIRM_FRAMES:
-            hit = {
-                Gesture.FIST:          "kick",
+        vol = max(0.15, min(1.0, 1.0 - self.right_hand.y_norm))
+
+        for hand, mapping in [
+            (self.left_hand, {
                 Gesture.ONE_FINGER:    "snare",
                 Gesture.TWO_FINGERS:   "hihat",
-                Gesture.THREE_FINGERS: "tom",
-                Gesture.OPEN_PALM:     "crash",
-                Gesture.PINCH:         "rimshot",
-            }.get(lh.gesture)
-            if hit:
-                self._fire(hit, lh)
+                Gesture.THREE_FINGERS: "bass_drum",
+                Gesture.OPEN_PALM:     "hand_cymbals",
+            }),
+            (self.right_hand, {
+                Gesture.ONE_FINGER:    "snare2",
+                Gesture.TWO_FINGERS:   "tambourine",
+                Gesture.THREE_FINGERS: "djembe",
+                Gesture.OPEN_PALM:     "clash_cymbals",
+            }),
+        ]:
+            # Call _should_fire once only — it mutates state so can't call twice
+            if not self._should_fire(hand):
+                continue
 
-        rh = self.right_hand
-        if rh.gesture_frames >= self.GESTURE_CONFIRM_FRAMES:
-            hit = {
-                Gesture.FIST:        "kick",
-                Gesture.ONE_FINGER:  "hihat_open",
-                Gesture.TWO_FINGERS: "hihat",
-                Gesture.OPEN_PALM:   "crash",
-            }.get(rh.gesture)
+            if hand.gesture == Gesture.THUMBS_UP:
+                continue  # handled by _check_mode_switch, don't play a sound
+
+            hit = mapping.get(hand.gesture)
             if hit:
-                self._fire(hit, rh)
+                self.sound.play(hit, volume=vol)
 
     # ── VIOLIN DISPATCH ──────────────────────────────────────────
 
     def _dispatch_violin(self):
-        for hand in (self.left_hand, self.right_hand):
-            if (hand.gesture == Gesture.THUMBS_UP and
-                    hand.gesture_frames == self.GESTURE_CONFIRM_FRAMES):
-                self._handle_thumbs_up()
-                return
+        self._check_mode_switch()
 
         if self.left_hand.gesture == Gesture.FIST:
             self.sound.stop_loop("violin")
@@ -286,32 +323,59 @@ class GestureEngine:
         if not self.left_hand.landmarks:
             return
 
-        notes = ["violin_A3","violin_C4","violin_D4","violin_E4",
-                 "violin_G4","violin_A4","violin_C5","violin_D5"]
+        notes = ["violin_A4","violin_B4","violin_C4","violin_D4","violin_E4",
+                 "violin_F4","violin_G4","violin_A5","violin_B5","violin_C5",
+                 "violin_D5","violin_E5","violin_F5","violin_G5"]
         idx  = int((1.0 - self.left_hand.y_norm) * (len(notes)-1))
         idx  = max(0, min(len(notes)-1, idx))
         vol  = max(0.05, min(1.0,
                1.0 - self.right_hand.y_norm if self.right_hand.landmarks else 0.7))
 
-        if idx != self.last_violin_note:
+        note_changed = idx != self.last_violin_note
+        if note_changed:
+            self._violin_changes.append(now)
+            self._violin_settled_since = now
+            self._using_long = False
+
+        self._violin_changes = [t for t in self._violin_changes if now - t < 0.6]
+
+        if note_changed:
             self.last_violin_note = idx
-            self.sound.play_loop("violin", notes[idx], volume=vol,
+            self.sound.stop_loop("violin")
+            long_name = notes[idx] + "_long"
+            sample_name = long_name if self.sound.has_sample(long_name) else notes[idx]
+            self.sound.play_loop("violin", sample_name, volume=vol,
+                                 vibrato=self.left_hand.is_waving)
+        elif self._using_long and not self.sound.loop_is_busy():
+            long_name = notes[idx] + "_long"
+            self.sound.play_loop("violin", long_name, volume=vol,
                                  vibrato=self.left_hand.is_waving)
         else:
             self.sound.set_loop_volume("violin", vol)
 
     # ── LABELS FOR HUD ───────────────────────────────────────────
 
-    DRUM_MAP = {
-        Gesture.FIST:          "KICK",
+    DRUM_MAP_LEFT = {
+        Gesture.FIST:          "rest",
         Gesture.ONE_FINGER:    "SNARE",
         Gesture.TWO_FINGERS:   "HI-HAT",
-        Gesture.THREE_FINGERS: "TOM",
-        Gesture.OPEN_PALM:     "CRASH",
-        Gesture.PINCH:         "RIMSHOT",
+        Gesture.THREE_FINGERS: "BASS DRUM",
+        Gesture.OPEN_PALM:     "HAND CYMBALS",
         Gesture.THUMBS_UP:     "SWITCH →",
         Gesture.NEUTRAL:       "—",
         Gesture.WAVE:          "—",
+        Gesture.PINCH:         "—",
+    }
+    DRUM_MAP_RIGHT = {
+        Gesture.FIST:          "rest",
+        Gesture.ONE_FINGER:    "SNARE 2",
+        Gesture.TWO_FINGERS:   "TAMBOURINE",
+        Gesture.THREE_FINGERS: "DJEMBE",
+        Gesture.OPEN_PALM:     "CLASH CYMBALS",
+        Gesture.THUMBS_UP:     "SWITCH →",
+        Gesture.NEUTRAL:       "—",
+        Gesture.WAVE:          "—",
+        Gesture.PINCH:         "—",
     }
     VIOLIN_MAP = {
         Gesture.FIST:          "MUTE",
@@ -325,8 +389,11 @@ class GestureEngine:
         Gesture.PINCH:         "MUTE",
     }
 
-    def _gesture_label(self, hand: HandState) -> str:
-        m = self.DRUM_MAP if self.mode == Mode.DRUMS else self.VIOLIN_MAP
+    def _gesture_label(self, hand: HandState, is_left: bool) -> str:
+        if self.mode == Mode.VIOLIN:
+            m = self.VIOLIN_MAP
+        else:
+            m = self.DRUM_MAP_LEFT if is_left else self.DRUM_MAP_RIGHT
         if hand.is_waving and self.mode == Mode.VIOLIN:
             return "VIBRATO"
         return m.get(hand.gesture, "—")
@@ -354,8 +421,8 @@ class GestureEngine:
             else:
                 self._dispatch_violin()
 
-            self.left_label  = self._gesture_label(self.left_hand)
-            self.right_label = self._gesture_label(self.right_hand)
+            self.left_label  = self._gesture_label(self.left_hand, is_left=True)
+            self.right_label = self._gesture_label(self.right_hand, is_left=False)
 
             if results.multi_hand_landmarks:
                 for hand_lm, hand_info in zip(

@@ -50,8 +50,8 @@ class SoundEngine:
             return
 
         for fname in os.listdir(self.samples_dir):
-            if fname.endswith(".wav"):
-                key = fname[:-4]  # strip .wav
+            if fname.endswith(".wav") or fname.endswith(".mp3"):
+                key = fname.rsplit(".", 1)[0]  # strip extension regardless of type
                 path = os.path.join(self.samples_dir, fname)
                 try:
                     self._samples[key] = pygame.mixer.Sound(path)
@@ -61,6 +61,9 @@ class SoundEngine:
 
     def sample_count(self) -> int:
         return len(self._samples)
+
+    def has_sample(self, name: str) -> bool:
+        return name in self._samples
 
     def _get_sample(self, name: str) -> Optional[pygame.mixer.Sound]:
         """Return sample or None with a helpful warning"""
@@ -101,9 +104,13 @@ class SoundEngine:
             return
 
         sample.set_volume(max(0.0, min(1.0, volume)))
+        # Use loops=0 (play once) for long sustain samples to avoid loop cut artifacts
+        # gesture_engine will retrigger as needed
+        loops = 0 if sample_name.endswith("_long") else -1
+        self._loop_channel.play(sample, loops=loops, fade_ms=120)
 
-        # -1 = loop forever
-        self._loop_channel.play(sample, loops=-1, fade_ms=40)
+    def loop_is_busy(self) -> bool:
+        return self._loop_channel.get_busy()
 
     def set_loop_volume(self, instrument: str, volume: float):
         """Update loop volume in real time (right hand height)"""
