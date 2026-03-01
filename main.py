@@ -35,10 +35,10 @@ def main():
     parser.add_argument("--elevenlabs-key", default=os.getenv("ELEVENLABS_API_KEY",""),
                         help="ElevenLabs API key (or set ELEVENLABS_API_KEY env var)")
     parser.add_argument("--samples-dir", default="samples")
-    parser.add_argument("--camera", type=int, default=0,
-                        help="Camera index. Try 1 or 2 if 0 shows wrong camera.")
-    parser.add_argument("--mirror", action="store_true",
-                        help="Flip left/right hand assignment (try this if hands are swapped)")
+    parser.add_argument("--camera", type=int, default=1,
+                        help="Camera index. Try 0 or 2 if wrong camera shows.")
+    parser.add_argument("--mirror", default=True, action=argparse.BooleanOptionalAction,
+                        help="Flip left/right hand assignment (default: on)")
     parser.add_argument("--no-voice", action="store_true")
     args = parser.parse_args()
 

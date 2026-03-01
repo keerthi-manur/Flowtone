@@ -99,13 +99,18 @@ class GestureEngine:
         Reliable thumbs-up detection:
         - Thumb tip is well above the wrist
         - Thumb tip is higher than all other fingertips
-        - At least 3 of 4 fingers are curled (tip below its knuckle/MCP)
+        - All 4 fingers are curled (tip below its PIP joint, not just MCP)
+        - Thumb tip is above the index MCP (knuckle) — rules out fist
         """
         thumb_tip = lm[4]
         wrist     = lm[0]
 
         # Thumb tip must be clearly above wrist
-        if thumb_tip.y > wrist.y - 0.12:
+        if thumb_tip.y > wrist.y - 0.15:
+            return False
+
+        # Thumb tip must be above the index finger knuckle (rules out fist)
+        if thumb_tip.y > lm[5].y:
             return False
 
         # Thumb tip must be above all other fingertips
@@ -113,10 +118,10 @@ class GestureEngine:
         if any(thumb_tip.y > tip.y for tip in other_tips):
             return False
 
-        # Most fingers curled: tip below MCP (knuckle)
-        curled = sum(lm[tip].y > lm[mcp].y
-                     for tip, mcp in [(8,5),(12,9),(16,13),(20,17)])
-        return curled >= 3
+        # ALL fingers must be firmly curled: tip below PIP joint (stricter than MCP)
+        curled = sum(lm[tip].y > lm[pip].y
+                     for tip, pip in [(8,6),(12,10),(16,14),(20,18)])
+        return curled == 4
 
     def _pinch_dist(self, lm):
         return (((lm[4].x-lm[8].x)**2 + (lm[4].y-lm[8].y)**2) ** 0.5)
@@ -236,7 +241,8 @@ class GestureEngine:
                 return
 
         lh = self.left_hand
-        if lh.gesture_frames == self.GESTURE_CONFIRM_FRAMES:
+        # Fire once gesture is confirmed, then again whenever debounce clears
+        if lh.gesture_frames >= self.GESTURE_CONFIRM_FRAMES:
             hit = {
                 Gesture.FIST:          "kick",
                 Gesture.ONE_FINGER:    "snare",
@@ -249,7 +255,7 @@ class GestureEngine:
                 self._fire(hit, lh)
 
         rh = self.right_hand
-        if rh.gesture_frames == self.GESTURE_CONFIRM_FRAMES:
+        if rh.gesture_frames >= self.GESTURE_CONFIRM_FRAMES:
             hit = {
                 Gesture.FIST:        "kick",
                 Gesture.ONE_FINGER:  "hihat_open",
