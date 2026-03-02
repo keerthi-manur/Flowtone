@@ -162,7 +162,7 @@ flowtone/
 
 ## Troubleshooting
 
-**Wrong camera** — try `--camera 1` or `--camera 2`
+**Wrong camera, or you want to switch to your phone camera** — try `--camera 0`, `--camera 1`. or `--camera 2`
 
 **Hands swapped** — run with `--no-mirror` to toggle hand assignment
 
