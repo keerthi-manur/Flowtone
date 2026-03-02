@@ -73,40 +73,51 @@ pip install mediapipe opencv-python pygame numpy requests
 
 Place your audio files in a `samples/` folder. Supported formats: `.wav`, `.mp3`
 
+#### Quick start — generate placeholder samples
+
+If you just want to get up and running, run the synthesizer to generate basic sounds:
+
+```bash
+python download_samples.py
+```
+
+This generates simple drum hits and violin notes locally — no internet needed. They're functional but not the most expressive.
+
+#### For the full experience — Philharmonia Orchestra samples
+
+This project was built using samples from the **Philharmonia Orchestra Sound Samples** library, which are free to download for anyone:
+
+> [philharmonia.co.uk/explore/sound_samples](https://www.philharmonia.co.uk/explore/sound_samples)
+
+Search by instrument, download the notes you need, and rename them to match the filenames below.
+
 **Drums** — name your files:
 `snare.mp3`, `hihat.mp3`, `bass_drum.mp3`, `hand_cymbals.mp3`, `snare2.mp3`, `tambourine.mp3`, `djembe.mp3`, `clash_cymbals.mp3`
 
+For drums, free one-shot samples are also available on [freesound.org](https://freesound.org) (filter by CC0 license) and [99sounds.org](https://99sounds.org).
+
 **Violin** — name your files:
-`violin_A4.mp3`, `violin_B4.mp3`, `violin_C4.mp3`, `violin_D4.mp3`, `violin_E4.mp3`, `violin_F4.mp3`, `violin_G4.mp3`, `violin_A5.mp3` ... through `violin_G5.mp3`
+`violin_A4.mp3`, `violin_B4.mp3`, `violin_C4.mp3`, `violin_D4.mp3`, `violin_E4.mp3`, `violin_F4.mp3`, `violin_G4.mp3` and the same for the 5th octave (`violin_A5.mp3` ... `violin_G5.mp3`)
 
 For sustained bow sounds, add long versions with `_long` suffix:
 `violin_A4_long.mp3`, `violin_B4_long.mp3`, ... `violin_G5_long.mp3`
 
-**Flute** — name your files exactly:
+**Flute** — name your files:
 ```
-flute_A5_15_forte_normal.mp3
-flute_B5_15_forte_normal.mp3
-flute_C5_15_forte_normal.mp3
-flute_D5_15_forte_normal.mp3
-flute_A6_long_fortissimo_major-trill.mp3
-flute_B6_long_fortissimo_minor-trill.mp3
-flute_C6_long_mezzo-forte_major-trill.mp3
-flute_D6_long_piano_normal.mp3
+flute_A5.mp3
+flute_B5.mp3
+flute_C5.mp3
+flute_D5.mp3
+flute_A6_long.mp3
+flute_B6_long.mp3
+flute_C6_long.mp3
+flute_D6_long.mp3
 ```
 
-#### Getting samples
+### 4. (Optional) ElevenLabs voice announcements
 
-This project uses samples from the **Philharmonia Orchestra Sound Samples** library, which are free to download:
-
-> [philharmonia.co.uk/explore/sound_samples](https://www.philharmonia.co.uk/explore/sound_samples)
-
-Search by instrument, find the notes you need, and rename the downloaded files to match the naming convention above.
-
-For drums, free one-shot samples are available on [freesound.org](https://freesound.org) (filter by CC0 license) and [99sounds.org](https://99sounds.org).
-
-If you don't have any samples, run the synthesizer to generate basic placeholder sounds:
 ```bash
-python download_samples.py
+export ELEVENLABS_API_KEY=your_key_here
 ```
 
 ---

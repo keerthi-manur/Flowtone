@@ -418,13 +418,13 @@ class GestureEngine:
             return None
 
         if is_left:
-            return f"flute_{note}5_15_forte_normal"
+            return f"flute_{note}5"
         else:
             upper_map = {
-                "A": "flute_A6_long_fortissimo_major-trill",
-                "B": "flute_B6_long_fortissimo_minor-trill",
-                "C": "flute_C6_long_mezzo-forte_major-trill",
-                "D": "flute_D6_long_piano_normal",
+                "A": "flute_A6_long",
+                "B": "flute_B6_long",
+                "C": "flute_C6_long",
+                "D": "flute_D6_long",
             }
             return upper_map[note]
 
