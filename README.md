@@ -113,13 +113,6 @@ flute_B6_long.mp3
 flute_C6_long.mp3
 flute_D6_long.mp3
 ```
-
-### 4. (Optional) ElevenLabs voice announcements
-
-```bash
-export ELEVENLABS_API_KEY=your_key_here
-```
-
 ---
 
 ## Run
