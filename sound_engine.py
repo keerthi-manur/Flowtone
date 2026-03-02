@@ -12,32 +12,34 @@ from typing import Dict, Optional
 
 
 class SoundEngine:
-    # Drums use 8 channels (simultaneous hits), violin uses a dedicated channel
-    DRUM_CHANNELS = 8
-    VIOLIN_CHANNEL = 8  # channel index for looping violin
-    TOTAL_CHANNELS = 9
+    DRUM_CHANNELS   = 8
+    VIOLIN_CHANNEL  = 8
+    FLUTE_L_CHANNEL = 9
+    FLUTE_R_CHANNEL = 10
+    TOTAL_CHANNELS  = 11
 
     def __init__(self, samples_dir: str):
         self.samples_dir = samples_dir
         self._samples: Dict[str, pygame.mixer.Sound] = {}
-        self._loop_channel: Optional[pygame.mixer.Channel] = None
         self._drum_channel_idx = 0
         self._drum_channels: list = []
         self._lock = threading.Lock()
 
-        # Init pygame mixer with low latency settings
         pygame.mixer.pre_init(
             frequency=44100,
-            size=-16,          # signed 16-bit
-            channels=2,        # stereo
-            buffer=256,        # small buffer = low latency (256 vs default 512)
+            size=-16,
+            channels=2,
+            buffer=256,
         )
         pygame.mixer.init()
         pygame.mixer.set_num_channels(self.TOTAL_CHANNELS)
 
-        # Allocate channels
         self._drum_channels = [pygame.mixer.Channel(i) for i in range(self.DRUM_CHANNELS)]
-        self._loop_channel = pygame.mixer.Channel(self.VIOLIN_CHANNEL)
+        self._loop_channels = {
+            "violin":      pygame.mixer.Channel(self.VIOLIN_CHANNEL),
+            "flute_left":  pygame.mixer.Channel(self.FLUTE_L_CHANNEL),
+            "flute_right": pygame.mixer.Channel(self.FLUTE_R_CHANNEL),
+        }
 
     # ── SAMPLE LOADING ────────────────────────────────────────────
 
@@ -91,37 +93,33 @@ class SoundEngine:
 
         ch.play(sample)
 
-    # ── VIOLIN LOOPING ────────────────────────────────────────────
+    # ── LOOPING ───────────────────────────────────────────────────
 
     def play_loop(self, instrument: str, sample_name: str,
                   volume: float = 0.7, vibrato: bool = False):
-        """
-        Play a sample in a loop on the dedicated loop channel.
-        Crossfades when switching notes.
-        """
         sample = self._get_sample(sample_name)
         if sample is None:
             return
-
+        ch = self._loop_channels.get(instrument)
+        if ch is None:
+            return
+        loops = 0 if (sample_name.endswith("_long") or "trill" in sample_name) else -1
         sample.set_volume(max(0.0, min(1.0, volume)))
-        # Use loops=0 (play once) for long sustain samples to avoid loop cut artifacts
-        # gesture_engine will retrigger as needed
-        loops = 0 if sample_name.endswith("_long") else -1
-        self._loop_channel.play(sample, loops=loops, fade_ms=120)
+        ch.play(sample, loops=loops, fade_ms=120)
 
-    def loop_is_busy(self) -> bool:
-        return self._loop_channel.get_busy()
+    def loop_is_busy(self, instrument: str = "violin") -> bool:
+        ch = self._loop_channels.get(instrument)
+        return ch.get_busy() if ch else False
 
     def set_loop_volume(self, instrument: str, volume: float):
-        """Update loop volume in real time (right hand height)"""
-        if self._loop_channel.get_busy():
-            # pygame doesn't have a direct channel volume setter for the
-            # currently playing sound, so we set it on the channel itself
-            self._loop_channel.set_volume(max(0.0, min(1.0, volume)))
+        ch = self._loop_channels.get(instrument)
+        if ch and ch.get_busy():
+            ch.set_volume(max(0.0, min(1.0, volume)))
 
     def stop_loop(self, instrument: str):
-        """Stop the looping violin note (fade out)"""
-        self._loop_channel.fadeout(80)
+        ch = self._loop_channels.get(instrument)
+        if ch:
+            ch.fadeout(80)
 
     # ── CLEANUP ───────────────────────────────────────────────────
 

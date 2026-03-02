@@ -16,6 +16,7 @@ from enum import Enum
 class Mode(Enum):
     DRUMS  = "drums"
     VIOLIN = "violin"
+    FLUTE  = "flute"
 
 
 class Gesture(Enum):
@@ -49,7 +50,7 @@ class HandState:
 class GestureEngine:
     GESTURE_CONFIRM_FRAMES = 5
     GESTURE_CONFIRM_THRESH = 3
-    THUMBS_CONFIRM_FRAMES  = 10   # ~0.67s at 30fps — must hold deliberately
+    THUMBS_CONFIRM_FRAMES  = 20   # ~0.67s at 30fps — must hold deliberately
     VIOLIN_UPDATE_INTERVAL = 0.15  # seconds between note changes
     THUMBS_DEBOUNCE        = 1.2
     WAVE_WINDOW            = 14
@@ -85,6 +86,9 @@ class GestureEngine:
         self._violin_settled_since = 0.0
         self._using_long           = False
         self._switch_armed         = False
+        self._last_flute           = {"left": None, "right": None}
+        self._flute_history        = {"left": [], "right": []}
+        self._flute_update_time    = 0.0
 
         self.frame_count = 0
         self.fps         = 0
@@ -262,13 +266,18 @@ class GestureEngine:
             return
         self.last_thumbs_time = now
         self.sound.stop_loop("violin")
+        self.sound.stop_loop("flute_left")
+        self.sound.stop_loop("flute_right")
 
         if self.mode == Mode.DRUMS:
-            self.mode  = Mode.VIOLIN
-            phrase     = "Switching to violin"
+            self.mode = Mode.VIOLIN
+            phrase    = "Switching to violin"
+        elif self.mode == Mode.VIOLIN:
+            self.mode = Mode.FLUTE
+            phrase    = "Switching to flute"
         else:
-            self.mode  = Mode.DRUMS
-            phrase     = "Switching to drums"
+            self.mode = Mode.DRUMS
+            phrase    = "Switching to drums"
 
         if self.voice:
             threading.Thread(target=self.voice.speak,
@@ -346,14 +355,121 @@ class GestureEngine:
             sample_name = long_name if self.sound.has_sample(long_name) else notes[idx]
             self.sound.play_loop("violin", sample_name, volume=vol,
                                  vibrato=self.left_hand.is_waving)
-        elif self._using_long and not self.sound.loop_is_busy():
+        elif self._using_long and not self.sound.loop_is_busy("violin"):
             long_name = notes[idx] + "_long"
             self.sound.play_loop("violin", long_name, volume=vol,
                                  vibrato=self.left_hand.is_waving)
         else:
             self.sound.set_loop_volume("violin", vol)
 
-    # ── LABELS FOR HUD ───────────────────────────────────────────
+    def _flute_fingering(self, lm, is_left: bool) -> Optional[str]:
+        """
+        Classify hand into a flute note based on finger curl pattern.
+        Both hands use thumb + progressive finger curling.
+        Curl = tip below PIP joint.
+
+        Left hand  → lower octave (A5, B5, C5, D5)
+        Right hand → upper octave (A6, B6, C6, D6)
+
+        Thumb curled = prerequisite for any note (anchor finger).
+        Then count how many of index/middle/ring/pinky are also curled:
+          thumb only           → rest (no note)
+          thumb + index        → A
+          thumb + index+middle → B
+          thumb + i+m+ring     → C
+          thumb + all 4        → D
+        Open palm (thumb up)   → rest/silence
+        """
+        def dist2d(a, b):
+            return ((lm[a].x - lm[b].x)**2 + (lm[a].y - lm[b].y)**2) ** 0.5
+
+        hand_size = dist2d(0, 9) + 0.001
+
+        def finger_curled(tip, dip):
+            return (dist2d(tip, dip) / hand_size) < 0.15
+
+        idx_c   = finger_curled(8,  7)
+        mid_c   = finger_curled(12, 11)
+        ring_c  = finger_curled(16, 15)
+        pinky_c = finger_curled(20, 19)
+
+        # Progressive mapping: index must be down before middle counts, etc.
+        # This prevents weird combos like ring-only or pinky-only
+        if idx_c and mid_c and ring_c and pinky_c:
+            n_down = 4
+        elif idx_c and mid_c and ring_c:
+            n_down = 3
+        elif idx_c and mid_c:
+            n_down = 2
+        elif idx_c:
+            n_down = 1
+        else:
+            n_down = 0
+
+        octave = "5" if is_left else "6"
+
+        # More fingers down = more holes covered = lower note
+        # 0 down = open = rest, 1 down = A, 2 = B, 3 = C, 4 = D
+        if n_down == 0:
+            return None
+        note_map = {1: "A", 2: "B", 3: "C", 4: "D"}
+        note = note_map.get(n_down)
+        if not note:
+            return None
+
+        if is_left:
+            return f"flute_{note}5_15_forte_normal"
+        else:
+            upper_map = {
+                "A": "flute_A6_long_fortissimo_major-trill",
+                "B": "flute_B6_long_fortissimo_minor-trill",
+                "C": "flute_C6_long_mezzo-forte_major-trill",
+                "D": "flute_D6_long_piano_normal",
+            }
+            return upper_map[note]
+
+    # ── FLUTE DISPATCH ───────────────────────────────────────────
+
+    FLUTE_UPDATE_INTERVAL = 0.05
+    FLUTE_SMOOTH_WINDOW   = 4   # frames note must be stable before switching
+
+    def _dispatch_flute(self):
+        self._check_mode_switch()
+
+        now = time.time()
+        if now - self._flute_update_time < self.FLUTE_UPDATE_INTERVAL:
+            return
+        self._flute_update_time = now
+
+        def smooth_and_play(hand_landmarks, is_left, history_key, last_key, channel):
+            note = self._flute_fingering(hand_landmarks, is_left=is_left)
+            history = self._flute_history[history_key]
+            history.append(note)
+            if len(history) > self.FLUTE_SMOOTH_WINDOW:
+                history.pop(0)
+            # Only accept note if it's been stable for the whole window
+            if len(history) == self.FLUTE_SMOOTH_WINDOW and len(set(history)) == 1:
+                stable_note = history[0]
+                if stable_note != self._last_flute[last_key]:
+                    self._last_flute[last_key] = stable_note
+                    if stable_note:
+                        self.sound.play_loop(channel, stable_note, volume=0.8)
+                    else:
+                        self.sound.stop_loop(channel)
+
+        if self.left_hand.landmarks:
+            smooth_and_play(self.left_hand.landmarks, True, "left", "left", "flute_left")
+        else:
+            if self._last_flute["left"]:
+                self._last_flute["left"] = None
+                self.sound.stop_loop("flute_left")
+
+        if self.right_hand.landmarks:
+            smooth_and_play(self.right_hand.landmarks, False, "right", "right", "flute_right")
+        else:
+            if self._last_flute["right"]:
+                self._last_flute["right"] = None
+                self.sound.stop_loop("flute_right")
 
     DRUM_MAP_LEFT = {
         Gesture.FIST:          "rest",
@@ -389,8 +505,28 @@ class GestureEngine:
         Gesture.PINCH:         "MUTE",
     }
 
+    FLUTE_MAP_LEFT = {
+        "A": "A5", "B": "B5", "C": "C5", "D": "D5", None: "rest",
+    }
+    FLUTE_MAP_RIGHT = {
+        "A": "A6", "B": "B6", "C": "C6", "D": "D6", None: "rest",
+    }
+
+    def _flute_label(self, hand: HandState, is_left: bool) -> str:
+        if not hand.landmarks:
+            return "—"
+        note = self._flute_fingering(hand.landmarks, is_left=is_left)
+        if note is None:
+            return "rest"
+        # Extract note letter from sample name
+        letter = note.split("_")[1][0]  # e.g. "flute_A5_..." → "A"
+        octave = "5" if is_left else "6"
+        return f"{letter}{octave}"
+
     def _gesture_label(self, hand: HandState, is_left: bool) -> str:
-        if self.mode == Mode.VIOLIN:
+        if self.mode == Mode.FLUTE:
+            return self._flute_label(hand, is_left)
+        elif self.mode == Mode.VIOLIN:
             m = self.VIOLIN_MAP
         else:
             m = self.DRUM_MAP_LEFT if is_left else self.DRUM_MAP_RIGHT
@@ -418,8 +554,10 @@ class GestureEngine:
 
             if self.mode == Mode.DRUMS:
                 self._dispatch_drums()
-            else:
+            elif self.mode == Mode.VIOLIN:
                 self._dispatch_violin()
+            else:
+                self._dispatch_flute()
 
             self.left_label  = self._gesture_label(self.left_hand, is_left=True)
             self.right_label = self._gesture_label(self.right_hand, is_left=False)
@@ -447,6 +585,8 @@ class GestureEngine:
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:
                 break
+            elif key == ord('m') or key == ord('M'):
+                self._handle_thumbs_up()
 
         self.cap.release()
         cv2.destroyAllWindows()

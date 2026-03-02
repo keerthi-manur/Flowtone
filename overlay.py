@@ -11,6 +11,7 @@ import numpy as np
 GREEN  = (0, 255, 160)
 BLUE   = (255, 180, 0)
 ORANGE = (53, 130, 255)
+PURPLE = (255, 100, 200)
 WHITE  = (230, 230, 230)
 GRAY   = (140, 150, 155)
 DIM    = (70, 85, 90)
@@ -48,6 +49,24 @@ VIOLIN_LEGEND = [
     ("👍 Both thumbs", "→ Switch mode"),
 ]
 
+FLUTE_LEGEND = [
+    ("LEFT HAND",  "lower octave"),
+    ("Thumb+index", "A5"),
+    ("+ middle",   "B5"),
+    ("+ ring",     "C5"),
+    ("+ pinky",    "D5"),
+    ("🖐 Open",    "rest"),
+    ("",           ""),
+    ("RIGHT HAND", "upper octave"),
+    ("Thumb+index", "A6"),
+    ("+ middle",   "B6"),
+    ("+ ring",     "C6"),
+    ("+ pinky",    "D6"),
+    ("🖐 Open",    "rest"),
+    ("",           ""),
+    ("👍 Both thumbs", "→ Switch mode"),
+]
+
 
 def _alpha_rect(frame, x, y, w, h, color=(0,0,0), alpha=0.55):
     sub = frame[y:y+h, x:x+w]
@@ -81,18 +100,24 @@ class Overlay:
         mode   = engine.mode.value.upper()
         lh     = engine.left_hand
         rh     = engine.right_hand
-        is_drum = mode == "DRUMS"
+        is_drum  = mode == "DRUMS"
+        is_flute = mode == "FLUTE"
 
         # ── RIGHT SIDE LEGEND PANEL ──────────────────────────────
         lx = fw - self.LEGEND_W
-        legend = DRUM_LEGEND if is_drum else VIOLIN_LEGEND
+        if is_drum:
+            legend     = DRUM_LEGEND
+            mode_color = GREEN
+        elif is_flute:
+            legend     = FLUTE_LEGEND
+            mode_color = PURPLE
+        else:
+            legend     = VIOLIN_LEGEND
+            mode_color = BLUE
+
         panel_h = len(legend) * 17 + 30
         _alpha_rect(frame, lx, 0, self.LEGEND_W, panel_h, (5,10,15), alpha=0.72)
-        cv2.rectangle(frame, (lx, 0), (fw-1, panel_h),
-                      GREEN if is_drum else BLUE, 1)
-
-        # Mode header
-        mode_color = GREEN if is_drum else BLUE
+        cv2.rectangle(frame, (lx, 0), (fw-1, panel_h), mode_color, 1)
         _text(frame, f"MODE: {mode}", lx+8, 18, mode_color, scale=0.5, thick=1)
         cv2.line(frame, (lx+6, 22), (fw-6, 22), mode_color, 1)
 
@@ -116,30 +141,31 @@ class Overlay:
         _text(frame, f"{engine.fps} FPS", 8, 22, DIM, scale=0.38)
 
         # Hint
-        hint = "Q to quit  |  Thumbs up = switch mode"
+        hint = "Q to quit  |  M = switch mode  |  both thumbs up = switch mode"
         _text(frame, hint, 70, 22, DIM, scale=0.36)
 
         # ── LEFT HAND BOX ────────────────────────────────────────
         if lh.landmarks:
             _alpha_rect(frame, 4, 44, 160, 76, (0,0,0), alpha=0.5)
-            cv2.rectangle(frame, (4,44), (164,120), GREEN, 1)
-            _text(frame, "LEFT", 10, 59, GREEN, scale=0.4)
+            cv2.rectangle(frame, (4,44), (164,120), mode_color, 1)
+            _text(frame, "LEFT", 10, 59, mode_color, scale=0.4)
 
             action = engine.left_label
             _text(frame, action, 10, 82, WHITE, scale=0.62, thick=1)
 
-            # Pitch note in violin mode
-            if not is_drum:
+            # Pitch note in violin mode only
+            if not is_drum and not is_flute:
                 idx  = int((1.0 - lh.y_norm) * (len(PENTATONIC)-1))
                 idx  = max(0, min(len(PENTATONIC)-1, idx))
                 note = PENTATONIC[idx]
-                _text(frame, note, 10, 108, GREEN, scale=0.7, thick=2)
+                _text(frame, note, 10, 108, mode_color, scale=0.7, thick=2)
                 if lh.is_waving:
                     _text(frame, "~ vibrato", 70, 108, ORANGE, scale=0.35)
 
-            # Pitch bar
-            _vbar(frame, 140, 48, 16, 66, 1.0 - lh.y_norm, GREEN)
-            _text(frame, "↕", 141, 122, DIM, scale=0.32)
+            # Pitch bar (violin only)
+            if not is_drum and not is_flute:
+                _vbar(frame, 140, 48, 16, 66, 1.0 - lh.y_norm, mode_color)
+                _text(frame, "↕", 141, 122, DIM, scale=0.32)
 
         else:
             _alpha_rect(frame, 4, 44, 160, 30, (0,0,0), alpha=0.4)
@@ -149,18 +175,17 @@ class Overlay:
         rx = lx - 168
         if rh.landmarks:
             _alpha_rect(frame, rx, 44, 160, 76, (0,0,0), alpha=0.5)
-            cv2.rectangle(frame, (rx,44), (rx+160,120), BLUE, 1)
-            _text(frame, "RIGHT", rx+8, 59, BLUE, scale=0.4)
+            cv2.rectangle(frame, (rx,44), (rx+160,120), mode_color, 1)
+            _text(frame, "RIGHT", rx+8, 59, mode_color, scale=0.4)
 
             action = engine.right_label
             _text(frame, action, rx+8, 82, WHITE, scale=0.62, thick=1)
 
-            vol = int((1.0 - rh.y_norm) * 100)
-            _text(frame, f"vol {vol}%", rx+8, 108, BLUE, scale=0.42)
-
-            # Volume bar
-            _vbar(frame, rx+138, 48, 16, 66, 1.0 - rh.y_norm, BLUE)
-            _text(frame, "↕", rx+139, 122, DIM, scale=0.32)
+            if not is_flute:
+                vol = int((1.0 - rh.y_norm) * 100)
+                _text(frame, f"vol {vol}%", rx+8, 108, mode_color, scale=0.42)
+                _vbar(frame, rx+138, 48, 16, 66, 1.0 - rh.y_norm, mode_color)
+                _text(frame, "↕", rx+139, 122, DIM, scale=0.32)
 
         else:
             _alpha_rect(frame, rx, 44, 160, 30, (0,0,0), alpha=0.4)
